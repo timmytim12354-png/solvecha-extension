@@ -377,6 +377,21 @@
       .replace(/>/g, "&gt;");
   }
 
+  function showingNeedKey() {
+    return Boolean(root && !root.hidden && shadow?.querySelector(".panel")?.classList.contains("needs-key"));
+  }
+
+  function showKeyReady() {
+    if (!showingNeedKey()) return;
+    const panel = shadow.querySelector(".panel");
+    panel.classList.remove("needs-key", "is-run", "is-done", "is-fail", "has-logs");
+    shadow.querySelector(".sub").textContent = "Key connected";
+    shadow.querySelector(".hint").textContent = "Click the captcha to solve";
+    shadow.querySelector(".count").textContent = "";
+    shadow.querySelector(".body").innerHTML =
+      `<div class="empty-block"><p>Key saved. Click the captcha to start solving.</p></div>`;
+  }
+
   function hasStoredKey(cb) {
     chrome.storage.local.get("apiKey", (stored) => {
       cb(Boolean(String(stored?.apiKey || "").trim()));
@@ -627,6 +642,7 @@
     open,
     hide,
     needKey: showNeedKey,
+    keyReady: showKeyReady,
     refresh: pullLogs,
     setLogs(entries, meta) {
       if (meta?.startedAt) startedAt = meta.startedAt;
@@ -637,6 +653,7 @@
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg?.type === "SOLVE_PANEL_OPEN") open(msg.label || "Live solve");
+    if (msg?.type === "KEY_CHANGED" && msg.hasKey) showKeyReady();
     if (msg?.type === "SOLVE_LOG") {
       if (msg.done === false) sawActive = true;
       if (msg.entries && msg.entries.length) applyLogs(msg);
@@ -661,8 +678,14 @@
       }
       hasStoredKey((ok) => {
         if (!ok) showNeedKey();
+        else showKeyReady();
       });
     },
     true,
   );
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local" || !changes.apiKey) return;
+    if (String(changes.apiKey.newValue || "").trim()) showKeyReady();
+  });
 })();

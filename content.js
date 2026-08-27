@@ -32,8 +32,30 @@
   const state = new Map(); // `${kind}:${sitekey}` -> { phase, retries }
 
   let config = { enabled: true, apiKey: "", pausedSites: [] };
-  chrome.storage.local.get(["enabled", "apiKey", "pausedSites"], (stored) => {
+
+  function hasApiKey() {
+    return Boolean(String(config.apiKey || "").trim());
+  }
+
+  function applyStoredConfig(stored) {
     config = { ...config, ...stored };
+    config.apiKey = String(config.apiKey || "").trim();
+  }
+
+  function onApiKeyReady() {
+    for (const s of state.values()) {
+      if (s.phase === "needs_key") s.phase = "idle";
+    }
+    try {
+      globalThis.__solvechaPanel?.keyReady?.();
+    } catch {
+      /* panel script not injected in this frame */
+    }
+    scan();
+  }
+
+  chrome.storage.local.get(["enabled", "apiKey", "pausedSites"], (stored) => {
+    applyStoredConfig(stored);
     scan();
   });
   chrome.storage.onChanged.addListener((changes, area) => {
@@ -41,12 +63,15 @@
     for (const key of ["enabled", "apiKey", "pausedSites"]) {
       if (changes[key]) config[key] = changes[key].newValue;
     }
-    if (changes.apiKey) {
-      for (const s of state.values()) {
-        if (s.phase === "needs_key") s.phase = "idle";
-      }
-      scan();
-    }
+    config.apiKey = String(config.apiKey || "").trim();
+    if (changes.apiKey && hasApiKey()) onApiKeyReady();
+  });
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg?.type !== "KEY_CHANGED") return;
+    chrome.storage.local.get(["enabled", "apiKey", "pausedSites"], (stored) => {
+      applyStoredConfig(stored);
+      if (hasApiKey()) onApiKeyReady();
+    });
   });
 
   function isTurnstileSitekey(k) {
@@ -224,8 +249,15 @@
     s.phase = "solving";
     state.set(key, s);
 
+    chrome.storage.local.get("apiKey", (stored) => {
+      config.apiKey = String(stored?.apiKey || "").trim();
+      startSolve(sitekey, captchaType, s, key);
+    });
+  }
+
+  function startSolve(sitekey, captchaType, s, key) {
     const label = captchaType === "turnstile" ? "Turnstile" : "hCaptcha";
-    if (!String(config.apiKey || "").trim()) {
+    if (!hasApiKey()) {
       s.phase = "needs_key";
       state.set(key, s);
       try {

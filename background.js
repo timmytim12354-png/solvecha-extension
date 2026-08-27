@@ -165,6 +165,22 @@ function startLogPoll(config, trace) {
   logPollTimer = setInterval(() => pollTraceOnce(config, trace), 450);
 }
 
+function notifyTabsKeyChanged(hasKey) {
+  chrome.tabs.query({}, (tabs) => {
+    for (const tab of tabs) {
+      if (tab.id == null) continue;
+      chrome.tabs.sendMessage(tab.id, { type: "KEY_CHANGED", hasKey: Boolean(hasKey) }, { frameId: 0 }, () => {
+        void chrome.runtime.lastError;
+      });
+    }
+  });
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !changes.apiKey) return;
+  notifyTabsKeyChanged(Boolean(String(changes.apiKey.newValue || "").trim()));
+});
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   handleMessage(msg, sender)
     .then((result) =>

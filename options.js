@@ -76,15 +76,15 @@ $("btn-save-key").addEventListener("click", async () => {
   btn.innerHTML = '<span class="spinner"></span>';
   setAlert(null);
   try {
+    await setConfig({ apiKey: key });
     const res = await chrome.runtime.sendMessage({ type: "VALIDATE_KEY", key });
     if (res.ok) {
-      await setConfig({ apiKey: key });
       setAlert(
         `Connected — <strong>${res.data.account.name || "account"}</strong> · ${res.data.account.planName} plan`,
         "success",
       );
     } else {
-      setAlert(res.message);
+      setAlert(res.message || "Saved the key, but it could not be verified yet.");
     }
   } finally {
     btn.disabled = false;

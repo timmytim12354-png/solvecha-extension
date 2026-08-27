@@ -150,7 +150,9 @@
     }, 5000);
 
     chrome.runtime.sendMessage(
-      { type: "SOLVE", sitekey, pageurl: location.href },
+      { type: "SOLVE", sitekey, pageurl: (function () {
+          try { return window.top.location.href; } catch { return location.href; }
+        })() },
       (res) => {
         clearInterval(elapsedTimer);
         if (chrome.runtime.lastError || !res) {
@@ -162,12 +164,17 @@
           s.phase = "solved";
           clearTimeout(s.retryTimer);
           injectToken(res.token);
+          chrome.runtime.sendMessage({ type: "INJECT_TOKEN", token: res.token }, () => {});
           return;
         }
         s.phase = "failed";
         s.retries += 1;
         toast(res.message || "Solve failed", "error");
-        // Give the page a moment, then retry if the challenge is still open.
+        const busy =
+          res.code === "rate_limited" ||
+          res.code === "solver_unavailable" ||
+          res.code === "timeout" ||
+          res.code === "solve_timeout";
         if (s.retries < MAX_RETRIES && challengePresent()) {
           clearTimeout(s.retryTimer);
           s.retryTimer = setTimeout(() => {
@@ -175,7 +182,7 @@
             if (cur && cur.phase === "failed" && cur.retries < MAX_RETRIES && challengePresent()) {
               triggerSolve(sitekey);
             }
-          }, 3000); // Faster retry: was 6000ms, now 3000ms
+          }, busy ? 10000 : 4000);
         }
       },
     );
@@ -291,9 +298,10 @@
     toastEl.className = `solvecha-toast ${kind || "info"}`;
     toastEl.hidden = false;
     clearTimeout(toastEl._t);
+    if (kind === "busy") return; // stay visible for the whole solve
     toastEl._t = setTimeout(() => {
       toastEl.hidden = true;
-    }, 5000);
+    }, kind === "error" ? 12000 : 5000);
   }
 
   // ---- wiring -------------------------------------------------------------

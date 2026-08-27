@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pack zip with files at archive root
+        run: python scripts/pack.py
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(python -c "import json; print(json.load(open('manifest.json'))['version'])")
+          TAG="v${VERSION}"
+          NOTES="$(cat <<EOF
+          ## Solvecha Auto-Captcha ${TAG}
+
+          Download **solvecha-extension-${VERSION}.zip** — \`manifest.json\` is at the zip root so Chrome can install it.
+
+          Do **not** use Code → Download ZIP. GitHub wraps that archive in a folder and Chrome reports *Could not unzip extension for install*.
+
+          ### Install
+          1. Open \`chrome://extensions\`
+          2. Turn on **Developer mode**
+          3. Drag the downloaded zip onto the page, or unzip it and click **Load unpacked**
+          EOF
+          )"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "dist/solvecha-extension-${VERSION}.zip" --clobber
+          else
+            gh release create "$TAG" "dist/solvecha-extension-${VERSION}.zip" \
+              --title "Solvecha Auto-Captcha ${TAG}" \
+              --notes "$NOTES"
+          fi

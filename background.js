@@ -356,15 +356,8 @@ async function performSolve(config, sitekey, pageurl, captchaType, attempt = 1, 
     const message = friendlyError(code, data);
 
     const busy = code === "rate_limited" || code === "solver_unavailable";
-    const retryable = new Set([
-      "rate_limited",
-      "solver_unavailable",
-      "solver_error",
-      "network",
-      "solve_timeout",
-      "timeout",
-    ]);
-    const maxAttempts = busy ? 4 : 2;
+    const retryable = new Set(["rate_limited", "solver_unavailable", "network"]);
+    const maxAttempts = busy ? 3 : 1;
     if (retryable.has(code) && attempt < maxAttempts) {
       const wait = busy ? (Number(data.retryAfter) || 8) * 1000 : code === "solve_timeout" ? 4000 : 800;
       addLog("warn", "queue", `Solver busy — retry ${attempt + 1} in ${Math.round(wait / 1000)}s`);

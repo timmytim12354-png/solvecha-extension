@@ -244,6 +244,11 @@
           if (res.ok && res.token) {
             s.phase = "solved";
             clearTimeout(s.retryTimer);
+            try {
+              globalThis.__solvechaPanel?.refresh?.();
+            } catch {
+              /* ignore */
+            }
             injectToken(res.token, captchaType);
             return;
           }

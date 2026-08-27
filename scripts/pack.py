@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
 
-SKIP_DIRS = {".git", ".github", "scripts", "dist", "node_modules", "_from_vps"}
+SKIP_DIRS = {".git", ".github", "scripts", "dist", "node_modules", "_from_vps", "chrome-extension"}
 SKIP_FILES = {
     ".gitignore",
     "README.md",

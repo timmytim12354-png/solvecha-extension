@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Solvecha Auto-Captcha",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Auto-solves hCaptcha and Cloudflare Turnstile with your solvecha.net account. Toggle on/off anytime.",
   "icons": {
     "16": "icons/icon16.png",

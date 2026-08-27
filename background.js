@@ -28,6 +28,7 @@ const liveLogs = {
   trace: null,
 };
 let logPollTimer = null;
+const logPorts = new Set();
 
 function newTraceId() {
   const raw = (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`).replace(/-/g, "");
@@ -44,18 +45,48 @@ function getLiveLogs() {
   };
 }
 
-function broadcastLogs() {
-  const payload = {
+function logPayload() {
+  return {
     type: "SOLVE_LOG",
     entries: liveLogs.entries,
     done: liveLogs.done,
     failed: liveLogs.failed,
     label: liveLogs.label,
+    startedAt: liveLogs.startedAt,
   };
-  if (liveLogs.tabId != null) {
-    chrome.tabs.sendMessage(liveLogs.tabId, payload).catch(() => {});
+}
+
+function broadcastLogs() {
+  const payload = logPayload();
+  for (const port of [...logPorts]) {
+    try {
+      port.postMessage(payload);
+    } catch {
+      logPorts.delete(port);
+    }
+  }
+  const tabId = liveLogs.tabId;
+  if (tabId == null) return;
+  try {
+    chrome.tabs.sendMessage(tabId, payload, { frameId: 0 }, () => {
+      void chrome.runtime.lastError;
+    });
+  } catch {
+    /* tab closed */
   }
 }
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "solvecha-logs") return;
+  logPorts.add(port);
+  try {
+    port.postMessage(logPayload());
+  } catch {
+    logPorts.delete(port);
+    return;
+  }
+  port.onDisconnect.addListener(() => logPorts.delete(port));
+});
 
 function addLog(level, kind, msg) {
   liveLogs.entries.push({ ts: Date.now(), level, kind, msg });
@@ -102,8 +133,15 @@ function startLogSession(tabId, captchaType, trace) {
   liveLogs.startedAt = Date.now();
   liveLogs.tabId = tabId ?? null;
   liveLogs.trace = trace;
+  broadcastLogs();
   if (tabId != null) {
-    chrome.tabs.sendMessage(tabId, { type: "SOLVE_PANEL_OPEN", label: liveLogs.label }).catch(() => {});
+    try {
+      chrome.tabs.sendMessage(tabId, { type: "SOLVE_PANEL_OPEN", label: liveLogs.label }, { frameId: 0 }, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch {
+      /* tab closed */
+    }
   }
 }
 

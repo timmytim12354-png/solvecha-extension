@@ -41,6 +41,12 @@
     for (const key of ["enabled", "apiKey", "pausedSites"]) {
       if (changes[key]) config[key] = changes[key].newValue;
     }
+    if (changes.apiKey) {
+      for (const s of state.values()) {
+        if (s.phase === "needs_key") s.phase = "idle";
+      }
+      scan();
+    }
   });
 
   function isTurnstileSitekey(k) {
@@ -214,11 +220,21 @@
   function triggerSolve(sitekey, captchaType) {
     const key = stateKey(captchaType, sitekey);
     const s = state.get(key) || { phase: "idle", retries: 0 };
-    if (s.phase === "solving" || s.phase === "solved") return;
+    if (s.phase === "solving" || s.phase === "solved" || s.phase === "needs_key") return;
     s.phase = "solving";
     state.set(key, s);
 
     const label = captchaType === "turnstile" ? "Turnstile" : "hCaptcha";
+    if (!String(config.apiKey || "").trim()) {
+      s.phase = "needs_key";
+      state.set(key, s);
+      try {
+        globalThis.__solvechaPanel?.needKey();
+      } catch {
+        /* panel script not injected in this frame */
+      }
+      return;
+    }
     try {
       globalThis.__solvechaPanel?.open(`Solving ${label}`);
     } catch {

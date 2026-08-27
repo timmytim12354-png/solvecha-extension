@@ -178,6 +178,16 @@
     .panel.is-min .foot { display: none; }
     .panel.is-min { width: 248px; }
 
+    .panel.needs-key .rail i,
+    .panel:not(.has-logs) .rail i {
+      animation: none;
+      width: 0;
+    }
+    .panel.needs-key.is-run .rail i { animation: none; width: 0; }
+    .panel:not(.has-logs) .clock,
+    .panel.needs-key .clock { display: none; }
+    .panel:not(.has-logs) .count { display: none; }
+
     .empty {
       display: flex;
       align-items: center;
@@ -186,6 +196,30 @@
       font-size: 11.5px;
       padding: 14px 10px 16px;
     }
+    .empty-block {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 12px 10px 14px;
+    }
+    .empty-block p {
+      margin: 0;
+      color: #d4d4d8;
+      font-size: 12.5px;
+      line-height: 1.45;
+    }
+    .cta {
+      appearance: none;
+      border: 0;
+      background: #fafafa;
+      color: #09090b;
+      font: 620 11.5px/1 ui-sans-serif, system-ui, sans-serif;
+      padding: 8px 11px;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    .cta:hover { background: #e4e4e7; }
     .pulse {
       width: 6px; height: 6px; border-radius: 50%;
       background: #eab308;
@@ -286,8 +320,8 @@
           <button class="btn close" title="Close">${ICO.close}</button>
         </div>
         <div class="rail"><i></i></div>
-        <div class="body"><div class="empty"><span class="pulse"></span>Waiting for solver</div></div>
-        <div class="foot"><span class="count">No events yet</span><span class="hint">Drag to move</span></div>
+        <div class="body"></div>
+        <div class="foot"><span class="count"></span><span class="hint">Drag to move</span></div>
       </div>`;
     (document.documentElement || document.body).appendChild(root);
 
@@ -343,11 +377,52 @@
       .replace(/>/g, "&gt;");
   }
 
+  function hasStoredKey(cb) {
+    chrome.storage.local.get("apiKey", (stored) => {
+      cb(Boolean(String(stored?.apiKey || "").trim()));
+    });
+  }
+
+  function bindConnectButton() {
+    const btn = shadow.querySelector(".cta");
+    if (!btn) return;
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      chrome.runtime.sendMessage({ type: "OPEN_OPTIONS" }, () => {
+        void chrome.runtime.lastError;
+      });
+    });
+  }
+
+  function showNeedKey() {
+    ensure();
+    clearTimeout(hideTimer);
+    hideAfterDone = false;
+    stopPolling();
+    startedAt = 0;
+    sessionAt = 0;
+    renderedN = 0;
+    lastSig = "";
+    const panel = shadow.querySelector(".panel");
+    panel.classList.add("needs-key");
+    panel.classList.remove("is-run", "is-done", "is-fail", "has-logs", "is-min", "leaving");
+    shadow.querySelector(".sub").textContent = "Key required";
+    shadow.querySelector(".hint").textContent = "Open settings to continue";
+    shadow.querySelector(".count").textContent = "";
+    shadow.querySelector(".body").innerHTML =
+      `<div class="empty-block"><p>Connect a key to the extension</p><button class="cta" type="button">Open settings</button></div>`;
+    bindConnectButton();
+    root.hidden = false;
+  }
+
   function resetSession() {
     const body = shadow.querySelector(".body");
-    body.innerHTML = `<div class="empty"><span class="pulse"></span>Waiting for solver</div>`;
+    const panel = shadow.querySelector(".panel");
+    panel.classList.remove("needs-key", "has-logs");
+    body.innerHTML = `<div class="empty"><span class="pulse"></span>Sending request…</div>`;
     renderedN = 0;
-    shadow.querySelector(".count").textContent = "No events yet";
+    shadow.querySelector(".count").textContent = "";
+    shadow.querySelector(".hint").textContent = "Drag to move";
   }
 
   function appendRow(entry) {
@@ -366,9 +441,10 @@
     const panel = shadow.querySelector(".panel");
     const sub = shadow.querySelector(".sub");
     const hint = shadow.querySelector(".hint");
-    panel.classList.toggle("is-run", !meta.done);
+    panel.classList.toggle("is-run", !meta.done && !meta.needsKey);
     panel.classList.toggle("is-done", Boolean(meta.done && !meta.failed));
     panel.classList.toggle("is-fail", Boolean(meta.failed));
+    panel.classList.toggle("needs-key", Boolean(meta.needsKey));
     if (meta.done && startedAt) {
       shadow.querySelector(".clock").textContent = fmtClock(Date.now() - startedAt);
     }
@@ -403,8 +479,16 @@
     if (list.length < renderedN) resetSession();
     for (let i = renderedN; i < list.length; i += 1) appendRow(list[i]);
     renderedN = list.length;
-    const n = list.length;
-    shadow.querySelector(".count").textContent = n === 1 ? "1 event" : `${n} events`;
+    const panelNow = shadow.querySelector(".panel");
+    if (renderedN > 0) {
+      panelNow.classList.add("has-logs");
+      panelNow.classList.remove("needs-key");
+      const n = renderedN;
+      shadow.querySelector(".count").textContent = n === 1 ? "1 event" : `${n} events`;
+    } else {
+      panelNow.classList.remove("has-logs");
+      shadow.querySelector(".count").textContent = "";
+    }
   }
 
   function tick() {
@@ -498,15 +582,18 @@
     hideAfterDone = false;
     sawActive = false;
     lastSig = "";
-    if (!startedAt) startedAt = Date.now();
     minimized = false;
     const panel = shadow.querySelector(".panel");
-    panel.classList.remove("is-min", "leaving");
+    panel.classList.remove("is-min", "leaving", "needs-key");
     shadow.querySelector(".min").innerHTML = ICO.min;
     root.hidden = false;
     if (label) shadow.querySelector(".sub").textContent = label;
+    if (renderedN === 0) {
+      startedAt = 0;
+      sessionAt = 0;
+      resetSession();
+    }
     startPolling();
-    tick();
   }
 
   function hide(immediate) {
@@ -539,6 +626,7 @@
   globalThis.__solvechaPanel = {
     open,
     hide,
+    needKey: showNeedKey,
     refresh: pullLogs,
     setLogs(entries, meta) {
       if (meta?.startedAt) startedAt = meta.startedAt;
@@ -551,10 +639,10 @@
     if (msg?.type === "SOLVE_PANEL_OPEN") open(msg.label || "Live solve");
     if (msg?.type === "SOLVE_LOG") {
       if (msg.done === false) sawActive = true;
-      applyLogs(msg);
-      if (!hideAfterDone) {
-        if (root?.hidden !== false) open(msg.label || "Live solve");
-        else startPolling();
+      if (msg.entries && msg.entries.length) applyLogs(msg);
+      else if (msg.done === false) open(msg.label || "Live solve");
+      if (!hideAfterDone && shadow && !root.hidden && !shadow.querySelector(".panel")?.classList.contains("needs-key")) {
+        startPolling();
       }
     }
   });
@@ -571,7 +659,9 @@
       ) {
         return;
       }
-      open("Solvecha");
+      hasStoredKey((ok) => {
+        if (!ok) showNeedKey();
+      });
     },
     true,
   );

@@ -190,6 +190,9 @@ async function handleMessage(msg, sender) {
       return validateKey(msg.key);
     case "GET_STATUS":
       return getStatus();
+    case "OPEN_OPTIONS":
+      await chrome.runtime.openOptionsPage();
+      return { ok: true };
     case "TOGGLE":
       await setConfig({ enabled: Boolean(msg.enabled) });
       return getStatus();

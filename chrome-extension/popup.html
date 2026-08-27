@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Solvecha</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="head">
+      <div class="brand">
+        <img src="icons/icon32.png" alt="" />
+        <div>
+          <strong>Solvecha</strong>
+          <span id="status-text">…</span>
+        </div>
+      </div>
+      <label class="switch" title="Auto-solve captchas everywhere">
+        <input type="checkbox" id="toggle" />
+        <span class="track"></span>
+      </label>
+    </header>
+
+    <section class="card" id="key-card">
+      <div id="no-key">
+        <p class="lead">Connect your solvecha.net API key to auto-solve captchas.</p>
+        <div class="row">
+          <button id="btn-get-key" class="btn btn-primary">Get a key</button>
+          <button id="btn-connect" class="btn btn-ghost">Connect key</button>
+        </div>
+      </div>
+      <div id="has-key" hidden>
+        <div class="kv"><span>Key</span><code id="key-masked">…</code></div>
+        <div class="kv">
+          <span>This month</span>
+          <strong id="quota-text">—</strong>
+        </div>
+        <div class="meter"><div id="quota-fill" class="meter-fill"></div></div>
+        <div class="kv"><span>Resets</span><span id="quota-reset" class="muted">—</span></div>
+      </div>
+    </section>
+
+    <div id="error-banner" class="error" hidden></div>
+
+    <section class="log-panel" id="log-panel" hidden>
+      <div class="log-header">
+        <span class="log-title">Live Activity</span>
+        <span class="log-timer" id="log-timer"></span>
+      </div>
+      <div class="log-entries" id="log-entries"></div>
+    </section>
+
+    <footer class="foot">
+      <button id="btn-settings" class="link">Settings</button>
+      <button id="btn-dashboard" class="link">Dashboard</button>
+      <span id="paused-note" class="muted" hidden></span>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

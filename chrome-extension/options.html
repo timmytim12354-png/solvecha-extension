@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Solvecha — Settings</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <div class="container">
+      <header class="page-head">
+        <h1>Solvecha Auto-Captcha</h1>
+        <p class="page-sub">
+          Auto-solve hCaptcha challenges with your own solvecha.net account. Every solve is
+          billed to <em>your</em> key — there is no shared key in this extension.
+        </p>
+      </header>
+
+      <!-- API key -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>API key</h2>
+          <button id="btn-open-dashboard" class="btn btn-ghost">Open dashboard</button>
+        </div>
+
+        <div class="field">
+          <label for="api-key">Your solvecha.net API key</label>
+          <input
+            id="api-key"
+            type="password"
+            placeholder="hk_…"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <p class="hint">
+            Keys are minted on solvecha.net after linking your Discord account — paste the
+            key and press <strong>Check &amp; save</strong>.
+          </p>
+        </div>
+
+        <div class="row">
+          <button id="btn-save-key" class="btn btn-primary">Check &amp; save</button>
+          <button id="btn-remove-key" class="btn btn-danger" hidden>Remove key</button>
+        </div>
+
+        <div id="key-alert"></div>
+
+        <ol class="steps">
+          <li>Create an account at <strong>solvecha.net</strong> (email/password or Discord).</li>
+          <li>
+            Link your Discord account — this is the verification step. Without it no API key
+            can be created.
+          </li>
+          <li>
+            Create a key on the dashboard, or DM <code>!api</code> to the Solvecha bot on
+            Discord to have a fresh key sent to you.
+          </li>
+          <li>Paste the key above. Usage (monthly quota, total solves) is tracked to that account.</li>
+        </ol>
+      </section>
+
+      <!-- Auto-solve -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Auto-solve</h2>
+          <label class="switch" title="Master toggle">
+            <input type="checkbox" id="toggle" />
+            <span class="track"></span>
+          </label>
+        </div>
+        <p class="hint">
+          When on, the extension detects hCaptcha widgets (the visible checkbox or a challenge
+          that pops up) and solves them automatically.
+        </p>
+      </section>
+
+      <!-- Paused sites -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Paused sites</h2>
+        </div>
+        <p class="hint">
+          Captchas on these sites are never auto-solved. Matches the domain and all its
+          subdomains.
+        </p>
+        <div class="row">
+          <input
+            id="pause-input"
+            type="text"
+            placeholder="example.com"
+            style="flex: 1; font-family: inherit"
+          />
+          <button id="btn-pause" class="btn btn-ghost">Pause site</button>
+        </div>
+        <ul id="pause-list" class="site-list"></ul>
+        <p id="pause-empty" class="empty">No paused sites.</p>
+      </section>
+
+      <!-- Usage -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Usage</h2>
+          <span id="plan-badge" class="badge" hidden></span>
+        </div>
+        <div class="kv"><span>Key</span><code id="usage-key">—</code></div>
+        <div class="kv">
+          <span>Monthly quota</span>
+          <strong id="usage-quota">—</strong>
+        </div>
+        <div class="meter"><div id="usage-fill" class="meter-fill"></div></div>
+        <div class="kv"><span>Resets</span><span id="usage-reset">—</span></div>
+        <div class="kv"><span>Total solves</span><strong id="usage-total">—</strong></div>
+      </section>
+
+      <!-- Advanced -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>Advanced</h2>
+        </div>
+        <div class="field">
+          <label for="api-base">API base URL</label>
+          <input id="api-base" type="text" spellcheck="false" />
+          <p class="hint">
+            Defaults to <code>https://solvecha.net</code>. Change only when self-hosting the
+            solvecha server (e.g. <code>http://localhost:3000</code>). The domain must be
+            allowed in the extension's host permissions.
+          </p>
+        </div>
+        <div class="row">
+          <button id="btn-save-base" class="btn btn-ghost">Save</button>
+        </div>
+      </section>
+
+      <!-- Security -->
+      <section class="panel">
+        <div class="panel-head">
+          <h2>How the key stays safe</h2>
+        </div>
+        <p class="hint">
+          Any secret baked into a Chrome extension can be extracted — an extension is just a
+          zip anyone can unpack. So this extension holds <strong>no shared key at all</strong>:
+        </p>
+        <ol class="steps">
+          <li>Each user needs their own solvecha.net account with a linked Discord account.</li>
+          <li>The API key is minted per account and is stored only in your browser's
+            <code>chrome.storage.local</code>.</li>
+          <li>Solves are sent straight to solvecha.net with <em>your</em> key as Bearer auth —
+            usage lands on your account's quota, and no one else can use your allowance.</li>
+          <li>Stealing the extension's source gives an attacker nothing: there is no key in it.</li>
+        </ol>
+      </section>
+    </div>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

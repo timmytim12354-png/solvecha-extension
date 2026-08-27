@@ -1,6 +1,6 @@
 # Solvecha Auto-Captcha
 
-Chrome extension that auto-solves hCaptcha through your [solvecha.net](https://solvecha.net) account.
+Chrome extension that auto-solves hCaptcha and Cloudflare Turnstile through your [solvecha.net](https://solvecha.net) account.
 
 ## Install (use a Release zip)
 
@@ -55,7 +55,7 @@ That writes `dist/solvecha-extension-<version>.zip` and `solvecha-extension.zip`
 Load this repository folder as an unpacked extension (`chrome://extensions` → **Load unpacked**). There is no build step.
 
 - `background.js` — talks to solvecha.net
-- `content.js` — finds hCaptcha and injects the token
+- `content.js` — finds hCaptcha / Turnstile and injects the token
 - `popup.*` / `options.*` — UI
 - `shared.js` — storage helpers (no secrets)
 

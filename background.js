@@ -7,8 +7,9 @@
 
 import { DEFAULT_API_BASE, getConfig, maskKey, setConfig } from "./shared.js";
 
-// A fresh hCaptcha token is valid for ~110s server-side; cache a bit less.
-const TOKEN_TTL_MS = 90_000;
+// A fresh hCaptcha token is valid for ~110s server-side; Turnstile ~300s.
+const HCAPTCHA_TTL_MS = 90_000;
+const TURNSTILE_TTL_MS = 240_000;
 // Stay under Cloudflare's ~100s origin timeout. Busy/unavailable retries
 // happen inside this window with short backoffs, not by stacking 90s calls.
 const SOLVE_TIMEOUT_MS = 95_000;
@@ -91,8 +92,9 @@ async function solve(msg) {
   }
   const sitekey = String(msg.sitekey || "").trim();
   const pageurl = String(msg.pageurl || "").trim();
+  const captchaType = msg.captchaType === "turnstile" ? "turnstile" : "hcaptcha";
   if (!sitekey) {
-    return { ok: false, code: "no_sitekey", message: "Couldn't read the hCaptcha sitekey." };
+    return { ok: false, code: "no_sitekey", message: "Couldn't read the captcha sitekey." };
   }
   if (!pageurl) {
     return { ok: false, code: "no_pageurl", message: "Couldn't read the page URL." };
@@ -104,7 +106,7 @@ async function solve(msg) {
   } catch {
     /* keep fallback */
   }
-  const cacheKey = `${sitekey}|${host}`;
+  const cacheKey = `${captchaType}|${sitekey}|${host}`;
 
   const cached = tokenCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
@@ -117,9 +119,10 @@ async function solve(msg) {
     return inFlight.get(cacheKey);
   }
 
-  const pending = performSolve(config, sitekey, pageurl).then((res) => {
+  const pending = performSolve(config, sitekey, pageurl, captchaType).then((res) => {
     if (res.ok && res.token) {
-      tokenCache.set(cacheKey, { token: res.token, expiresAt: Date.now() + TOKEN_TTL_MS });
+      const ttl = captchaType === "turnstile" ? TURNSTILE_TTL_MS : HCAPTCHA_TTL_MS;
+      tokenCache.set(cacheKey, { token: res.token, expiresAt: Date.now() + ttl });
     }
     return res;
   });
@@ -131,7 +134,7 @@ async function solve(msg) {
   }
 }
 
-async function performSolve(config, sitekey, pageurl, attempt = 1) {
+async function performSolve(config, sitekey, pageurl, captchaType, attempt = 1) {
   const base = config.apiBase || DEFAULT_API_BASE;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SOLVE_TIMEOUT_MS);
@@ -142,7 +145,7 @@ async function performSolve(config, sitekey, pageurl, attempt = 1) {
         "content-type": "application/json",
         authorization: `Bearer ${config.apiKey}`,
       },
-      body: JSON.stringify({ sitekey, pageurl }),
+      body: JSON.stringify({ sitekey, pageurl, type: captchaType }),
       signal: controller.signal,
     });
     const data = await res.json().catch(() => ({}));
@@ -176,7 +179,7 @@ async function performSolve(config, sitekey, pageurl, attempt = 1) {
     if (retryable.has(code) && attempt < maxAttempts) {
       const wait = busy ? (Number(data.retryAfter) || 8) * 1000 : code === "solve_timeout" ? 4000 : 800;
       await sleep(wait);
-      return performSolve(config, sitekey, pageurl, attempt + 1);
+      return performSolve(config, sitekey, pageurl, captchaType, attempt + 1);
     }
 
     await setStatus({ error: { code, message }, lastErrorAt: Date.now() });
@@ -185,7 +188,7 @@ async function performSolve(config, sitekey, pageurl, attempt = 1) {
     if (err?.name === "AbortError") {
       if (attempt < 3) {
         await sleep(5000);
-        return performSolve(config, sitekey, pageurl, attempt + 1);
+        return performSolve(config, sitekey, pageurl, captchaType, attempt + 1);
       }
       const message = `The solve is taking longer than ${Math.round(
         SOLVE_TIMEOUT_MS / 1000,
@@ -195,7 +198,7 @@ async function performSolve(config, sitekey, pageurl, attempt = 1) {
     }
     if (attempt < 3) {
       await sleep(1500 * attempt);
-      return performSolve(config, sitekey, pageurl, attempt + 1);
+      return performSolve(config, sitekey, pageurl, captchaType, attempt + 1);
     }
     const message = "Couldn't reach solvecha.net. Check your connection.";
     await setStatus({ error: { code: "network", message }, lastErrorAt: Date.now() });
@@ -256,6 +259,8 @@ async function injectTokenMain(msg, sender) {
           for (const sel of [
             'textarea[name="h-captcha-response"]',
             'textarea[name="g-recaptcha-response"]',
+            'input[name="g-recaptcha-response"]',
+            '[name="cf-turnstile-response"]',
             "[data-hcaptcha-response]",
           ]) {
             for (const el of document.querySelectorAll(sel)) {
@@ -280,6 +285,11 @@ async function injectTokenMain(msg, sender) {
           if (window.hcaptcha && typeof window.hcaptcha.setResponse === "function") {
             window.hcaptcha.setResponse(tok);
           }
+        } catch {
+          /* ignore */
+        }
+        try {
+          if (window.__solvechaTs) window.__solvechaTs.token = tok;
         } catch {
           /* ignore */
         }

@@ -1,33 +1,35 @@
 // Content script — runs in every frame of every page.
 //
 // What it does:
-//   1. Watches the DOM for hCaptcha widgets (visible checkbox iframes and/or
-//      challenge iframes that appear when a captcha "pops up").
+//   1. Watches the DOM for hCaptcha and Cloudflare Turnstile widgets
+//      (visible checkboxes, challenge iframes, and invisible widgets).
 //   2. When a captcha is detected and auto-solve is on, asks the background
 //      worker to solve it via the solvecha.net API (the API key never leaves
 //      the background worker).
-//   3. Injects the returned token into the widget (textarea + iframe message)
-//      and shows a tiny status toast.
+//   3. Injects the returned token into the widget and shows a tiny status toast.
 //
 // The content script holds no credentials and no shared secret.
 
 (() => {
   "use strict";
 
-  // Never run inside hCaptcha's own widget/challenge frames (the checkbox and
-  // challenge iframes served from newassets.hcaptcha.com) — nothing to solve
-  // there. The TOP-LEVEL page must still run even when it's hosted on an
-  // hcaptcha.com domain (e.g. the official demo at accounts.hcaptcha.com/demo).
-  if (window.top !== window && /(^|\.)hcaptcha\.com$/.test(location.hostname)) return;
+  // Never run inside the captcha provider's own frames. The TOP-LEVEL page
+  // must still run even when it's hosted on those domains (official demos).
+  if (window.top !== window) {
+    const host = location.hostname;
+    if (/(^|\.)hcaptcha\.com$/.test(host)) return;
+    if (/(^|\.)challenges\.cloudflare\.com$/.test(host)) return;
+  }
 
-  const CONTAINER_SELECTOR =
+  const HCAPTCHA_CONTAINER =
     'div.h-captcha, div[data-sitekey][class*="h-captcha"], iframe[src*="hcaptcha.com"], iframe[title*="hCaptcha"]';
   const CHALLENGE_IFRAME_SELECTOR =
     'iframe[src*="hcaptcha.com"][src*="challenge"], iframe[src*="hcaptcha.com"][src*="frame=challenge"]';
   const SITEKEY_IN_SRC = /[?&]sitekey=([^&]+)/;
+  const TURNSTILE_SITEKEY = /^(0x[0-9A-Za-z]+|[123]x[0-9A-Fa-f]+)$/;
 
   const MAX_RETRIES = 3;
-  const state = new Map(); // sitekey -> { phase, retries }
+  const state = new Map(); // `${kind}:${sitekey}` -> { phase, retries }
 
   let config = { enabled: true, apiKey: "", pausedSites: [] };
   chrome.storage.local.get(["enabled", "apiKey", "pausedSites"], (stored) => {
@@ -41,23 +43,77 @@
     }
   });
 
-  // ---- detection ---------------------------------------------------------
+  function isTurnstileSitekey(k) {
+    return TURNSTILE_SITEKEY.test(String(k || "").trim());
+  }
 
-  function extractSitekeys() {
-    const keys = new Set();
+  function isHcaptchaEl(el) {
+    if (!el) return false;
+    if (el.classList && el.classList.contains("h-captcha")) return true;
+    if (typeof el.closest === "function" && el.closest(".h-captcha")) return true;
+    const src = el.src || "";
+    return src.includes("hcaptcha.com");
+  }
+
+  function sitekeyFromCfSrc(src) {
+    const q = String(src || "").match(/[?&]k=([^&]+)/);
+    if (q && q[1]) return decodeURIComponent(q[1]);
+    const p = String(src || "").match(/\/(0x[0-9A-Za-z]+|[123]x[0-9A-Fa-f]+)(?:\/|$|\?)/);
+    return p ? p[1] : "";
+  }
+
+  function extractCaptchas() {
+    const found = [];
+    const add = (sitekey, kind) => {
+      const k = String(sitekey || "").trim();
+      if (!k) return;
+      if (!found.some((x) => x.sitekey === k && x.kind === kind)) {
+        found.push({ sitekey: k, kind });
+      }
+    };
+
     for (const el of document.querySelectorAll('div.h-captcha, div[data-sitekey][class*="h-captcha"]')) {
-      const k = el.getAttribute("data-sitekey");
-      if (k) keys.add(k.trim());
+      add(el.getAttribute("data-sitekey"), "hcaptcha");
     }
     for (const iframe of document.querySelectorAll('iframe[src*="hcaptcha.com"]')) {
       const m = iframe.src.match(SITEKEY_IN_SRC);
-      if (m && m[1]) keys.add(decodeURIComponent(m[1]));
+      if (m && m[1]) add(decodeURIComponent(m[1]), "hcaptcha");
     }
-    return keys;
+
+    for (const el of document.querySelectorAll(".cf-turnstile, #cf-turnstile")) {
+      add(el.getAttribute("data-sitekey"), "turnstile");
+    }
+    for (const el of document.querySelectorAll("[data-sitekey]")) {
+      if (isHcaptchaEl(el)) continue;
+      const k = el.getAttribute("data-sitekey");
+      if (isTurnstileSitekey(k) || (el.classList && el.classList.contains("cf-turnstile"))) {
+        add(k, "turnstile");
+      }
+    }
+    for (const iframe of document.querySelectorAll(
+      'iframe[src*="challenges.cloudflare.com"], iframe[src*="cdn-cgi/challenge-platform"]',
+    )) {
+      const k = sitekeyFromCfSrc(iframe.src);
+      if (k) add(k, "turnstile");
+    }
+    return found;
   }
 
-  function widgetFor(sitekey) {
-    for (const el of document.querySelectorAll(CONTAINER_SELECTOR)) {
+  function widgetFor(sitekey, kind) {
+    if (kind === "turnstile") {
+      for (const el of document.querySelectorAll(".cf-turnstile, #cf-turnstile, [data-sitekey]")) {
+        if (isHcaptchaEl(el)) continue;
+        const k = el.getAttribute("data-sitekey");
+        if (k && k.trim() === sitekey) return el;
+      }
+      for (const iframe of document.querySelectorAll(
+        'iframe[src*="challenges.cloudflare.com"], iframe[src*="cdn-cgi/challenge-platform"]',
+      )) {
+        if (sitekeyFromCfSrc(iframe.src) === sitekey) return iframe;
+      }
+      return document.querySelector(".cf-turnstile, #cf-turnstile");
+    }
+    for (const el of document.querySelectorAll(HCAPTCHA_CONTAINER)) {
       const k = el.getAttribute("data-sitekey");
       if (k && k.trim() === sitekey) return el;
     }
@@ -68,19 +124,24 @@
     return null;
   }
 
-  function isVisible(el) {
-    if (!el || !el.isConnected) return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 0 && r.height > 0;
-  }
-
   function challengePresent() {
     return !!document.querySelector(CHALLENGE_IFRAME_SELECTOR);
   }
 
-  function tokenPresent() {
+  function hcaptchaTokenPresent() {
     const ta = document.querySelector('textarea[name="h-captcha-response"]');
     return Boolean(ta && ta.value);
+  }
+
+  function turnstileTokenPresent() {
+    const el = document.querySelector('[name="cf-turnstile-response"]');
+    return Boolean(el && el.value && el.value.length > 40);
+  }
+
+  function turnstileWidgetPresent() {
+    return !!document.querySelector(
+      '.cf-turnstile, #cf-turnstile, iframe[src*="challenges.cloudflare.com"], iframe[src*="cdn-cgi/challenge-platform"]',
+    );
   }
 
   function isPaused() {
@@ -95,104 +156,195 @@
     });
   }
 
+  function stateKey(kind, sitekey) {
+    return `${kind}:${sitekey}`;
+  }
+
   function scan() {
     if (!config.enabled) return;
-    const keys = extractSitekeys();
-    if (!keys.size) return;
+    const captchas = extractCaptchas();
+    if (!captchas.length) return;
     const paused = isPaused();
 
-    for (const sitekey of keys) {
-      const s = state.get(sitekey) || { phase: "idle", retries: 0 };
-      state.set(sitekey, s);
+    for (const { sitekey, kind } of captchas) {
+      const key = stateKey(kind, sitekey);
+      const s = state.get(key) || { phase: "idle", retries: 0 };
+      state.set(key, s);
       if (s.phase === "solving") continue;
 
-      // A new challenge popped up for an already-solved widget whose token
-      // was consumed (form submitted, widget reset) — allow a re-solve.
-      if (s.phase === "solved" && challengePresent() && !tokenPresent()) {
+      if (kind === "hcaptcha") {
+        if (s.phase === "solved" && challengePresent() && !hcaptchaTokenPresent()) {
+          s.retries += 1;
+          s.phase = s.retries <= MAX_RETRIES ? "idle" : "failed";
+          if (s.phase !== "idle") continue;
+        }
+      } else if (s.phase === "solved" && turnstileWidgetPresent() && !turnstileTokenPresent()) {
         s.retries += 1;
         s.phase = s.retries <= MAX_RETRIES ? "idle" : "failed";
         if (s.phase !== "idle") continue;
       }
-      // Failed solves are retried on a timer below; scan() never re-arms
-      // them so we don't hammer a still-open challenge.
+
       if (s.phase !== "idle") continue;
       if (paused) continue;
 
-      const widget = widgetFor(sitekey);
-      if (!widget) continue;
+      const widget = widgetFor(sitekey, kind);
+      if (!widget && kind === "hcaptcha") continue;
 
-      // Only trigger when a challenge iframe is actually open.
-      // Previously this also fired when the checkbox was visible, which
-      // caused false-positive "Solving hCaptcha…" toasts on pages that
-      // just had a dormant widget with no challenge.
-      if (challengePresent()) {
-        triggerSolve(sitekey);
+      if (kind === "hcaptcha") {
+        if (challengePresent()) triggerSolve(sitekey, kind);
+        continue;
       }
+
+      if (turnstileTokenPresent()) {
+        s.phase = "solved";
+        continue;
+      }
+      triggerSolve(sitekey, kind);
     }
   }
 
-  // ---- solving -----------------------------------------------------------
+  function pageUrl() {
+    try {
+      return window.top.location.href;
+    } catch {
+      return location.href;
+    }
+  }
 
-  function triggerSolve(sitekey) {
-    const s = state.get(sitekey) || { phase: "idle", retries: 0 };
+  function triggerSolve(sitekey, captchaType) {
+    const key = stateKey(captchaType, sitekey);
+    const s = state.get(key) || { phase: "idle", retries: 0 };
     if (s.phase === "solving" || s.phase === "solved") return;
     s.phase = "solving";
-    state.set(sitekey, s);
+    state.set(key, s);
 
-    toast("Solving hCaptcha…", "busy");
-    // Solves run in a real browser on the solver service and can legitimately
-    // take 30-90s+. Keep the toast alive with elapsed time so a long solve
-    // doesn't look frozen.
+    const label = captchaType === "turnstile" ? "Turnstile" : "hCaptcha";
+    toast(`Solving ${label}…`, "busy");
     const solveStartedAt = Date.now();
     const elapsedTimer = setInterval(() => {
       const sec = Math.round((Date.now() - solveStartedAt) / 1000);
-      toast(`Solving hCaptcha… (${sec}s)`, "busy");
+      toast(`Solving ${label}… (${sec}s)`, "busy");
     }, 5000);
 
-    chrome.runtime.sendMessage(
-      { type: "SOLVE", sitekey, pageurl: (function () {
-          try { return window.top.location.href; } catch { return location.href; }
-        })() },
-      (res) => {
-        clearInterval(elapsedTimer);
-        if (chrome.runtime.lastError || !res) {
+    const startApi = () => {
+      chrome.runtime.sendMessage(
+        { type: "SOLVE", sitekey, pageurl: pageUrl(), captchaType },
+        (res) => {
+          clearInterval(elapsedTimer);
+          if (chrome.runtime.lastError || !res) {
+            s.phase = "failed";
+            toast("Extension error — reload the page", "error");
+            return;
+          }
+          if (res.ok && res.token) {
+            s.phase = "solved";
+            clearTimeout(s.retryTimer);
+            injectToken(res.token, captchaType);
+            return;
+          }
           s.phase = "failed";
-          toast("Extension error — reload the page", "error");
-          return;
-        }
-        if (res.ok && res.token) {
+          s.retries += 1;
+          toast(res.message || "Solve failed", "error");
+          const busy =
+            res.code === "rate_limited" ||
+            res.code === "solver_unavailable" ||
+            res.code === "timeout" ||
+            res.code === "solve_timeout";
+          const stillOpen =
+            captchaType === "turnstile"
+              ? turnstileWidgetPresent() && !turnstileTokenPresent()
+              : challengePresent();
+          if (s.retries < MAX_RETRIES && stillOpen) {
+            clearTimeout(s.retryTimer);
+            s.retryTimer = setTimeout(() => {
+              const cur = state.get(key);
+              if (cur && cur.phase === "failed" && cur.retries < MAX_RETRIES) {
+                triggerSolve(sitekey, captchaType);
+              }
+            }, busy ? 10000 : 4000);
+          }
+        },
+      );
+    };
+
+    // Invisible / managed Turnstile often mints a token in this browser
+    // before the remote solver would. Use it if it appears quickly.
+    if (captchaType === "turnstile") {
+      const started = Date.now();
+      const poll = () => {
+        if (turnstileTokenPresent()) {
+          clearInterval(elapsedTimer);
+          const el = document.querySelector('[name="cf-turnstile-response"]');
           s.phase = "solved";
-          clearTimeout(s.retryTimer);
-          injectToken(res.token);
-          chrome.runtime.sendMessage({ type: "INJECT_TOKEN", token: res.token }, () => {});
+          injectToken(el.value, "turnstile");
           return;
         }
-        s.phase = "failed";
-        s.retries += 1;
-        toast(res.message || "Solve failed", "error");
-        const busy =
-          res.code === "rate_limited" ||
-          res.code === "solver_unavailable" ||
-          res.code === "timeout" ||
-          res.code === "solve_timeout";
-        if (s.retries < MAX_RETRIES && challengePresent()) {
-          clearTimeout(s.retryTimer);
-          s.retryTimer = setTimeout(() => {
-            const cur = state.get(sitekey);
-            if (cur && cur.phase === "failed" && cur.retries < MAX_RETRIES && challengePresent()) {
-              triggerSolve(sitekey);
-            }
-          }, busy ? 10000 : 4000);
+        if (Date.now() - started >= 1600) {
+          startApi();
+          return;
         }
-      },
-    );
+        setTimeout(poll, 200);
+      };
+      poll();
+      return;
+    }
+
+    startApi();
   }
 
-  // ---- token injection ----------------------------------------------------
+  function injectToken(token, captchaType) {
+    if (captchaType === "turnstile") {
+      injectTurnstile(token);
+    } else {
+      injectHcaptcha(token);
+    }
+    toast("Captcha solved ✓", "ok");
+  }
 
-  function injectToken(token) {
-    let injectedNow = false;
+  function injectTurnstile(token) {
+    const write = () => {
+      let wrote = 0;
+      for (const sel of [
+        '[name="cf-turnstile-response"]',
+        'input[name="g-recaptcha-response"]',
+        'textarea[name="g-recaptcha-response"]',
+      ]) {
+        for (const el of document.querySelectorAll(sel)) {
+          el.value = token;
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+          wrote += 1;
+        }
+      }
+      return wrote > 0;
+    };
 
+    if (!write()) {
+      const mo = new MutationObserver(() => {
+        if (write()) mo.disconnect();
+      });
+      mo.observe(document.documentElement, { childList: true, subtree: true });
+      setTimeout(() => mo.disconnect(), 6000);
+    }
+
+    chrome.runtime.sendMessage(
+      { type: "INJECT_TOKEN", token, captchaType: "turnstile" },
+      () => {},
+    );
+
+    const fired = new Set();
+    for (const el of document.querySelectorAll(
+      ".cf-turnstile[data-callback], #cf-turnstile[data-callback], [data-sitekey][data-callback]",
+    )) {
+      if (isHcaptchaEl(el)) continue;
+      const cbName = el.getAttribute("data-callback");
+      if (!cbName || fired.has(cbName)) continue;
+      fired.add(cbName);
+      chrome.runtime.sendMessage({ type: "FIRE_CALLBACK", cbName, token }, () => {});
+    }
+  }
+
+  function injectHcaptcha(token) {
     const writeTextareas = () => {
       let wrote = 0;
       for (const ta of document.querySelectorAll('textarea[name="h-captcha-response"]')) {
@@ -204,9 +356,7 @@
       return wrote > 0;
     };
 
-    injectedNow = writeTextareas();
-    if (!injectedNow) {
-      // hCaptcha creates the textarea lazily; watch briefly for it.
+    if (!writeTextareas()) {
       const mo = new MutationObserver(() => {
         if (writeTextareas()) mo.disconnect();
       });
@@ -214,16 +364,6 @@
       setTimeout(() => mo.disconnect(), 6000);
     }
 
-    // Flip the checkbox to verified using hCaptcha's own iframe chat protocol.
-    // The checkbox iframe listens for a "checkbox-tick" message carrying the
-    // widget id (a plain {type:"hcaptcha-token"} message is NOT part of the
-    // protocol and does nothing). The widget id lives on the iframe element
-    // (data-hcaptcha-widget-id) or in the iframe src hash (#frame=checkbox&id=…).
-    //
-    // The widget iframe boots its chat listener asynchronously, so a solve
-    // that returns fast can post the tick before the listener exists and the
-    // message is silently dropped. Re-send the tick a few times to cover that
-    // window (idempotent — hCaptcha ignores ticks it can't use).
     const tickCheckboxes = () => {
       for (const iframe of document.querySelectorAll(
         'iframe[src*="hcaptcha.com"][src*="frame=checkbox"], iframe[data-hcaptcha-widget-id]',
@@ -232,10 +372,6 @@
           iframe.getAttribute("data-hcaptcha-widget-id") ||
           (iframe.src.match(/[?&#]id=([^&]+)/) || [])[1];
         if (!widgetId) continue;
-        // Deliver with "*": the checkbox frame can be a same-origin wrapper
-        // whose real origin differs from its src, and the payload is a plain
-        // chat message the frame itself validates (it accepts ticks from its
-        // own parent page, which is what we are).
         iframe.contentWindow?.postMessage(
           JSON.stringify({ source: "hcaptcha", label: "checkbox-tick", id: widgetId }),
           "*",
@@ -253,16 +389,8 @@
       tickCheckboxes();
     }, 500);
 
-    // Fire the widget's own callback (data-callback="onSuccess" etc.) with the
-    // token so the page's JS knows the captcha passed. Without this, the form
-    // may stay disabled even though the hidden textarea holds a valid token.
-    //
-    // This must run in the page's MAIN world: content scripts live in an
-    // isolated world where page globals (e.g. `var onSuccess = ...`) are not
-    // visible, and inline <script> injection is blocked by many sites' CSP
-    // (the hCaptcha demo page included). The background worker runs it via
-    // chrome.scripting.executeScript({ world: "MAIN" }), which is exempt from
-    // page CSP.
+    chrome.runtime.sendMessage({ type: "INJECT_TOKEN", token, captchaType: "hcaptcha" }, () => {});
+
     const fired = new Set();
     for (const el of document.querySelectorAll("[data-callback]")) {
       const cbName = el.getAttribute("data-callback");
@@ -270,11 +398,7 @@
       fired.add(cbName);
       chrome.runtime.sendMessage({ type: "FIRE_CALLBACK", cbName, token }, () => {});
     }
-
-    toast("Captcha solved ✓", "ok");
   }
-
-  // ---- toast ----------------------------------------------------------------
 
   let toastEl = null;
   function toast(message, kind) {
@@ -298,13 +422,11 @@
     toastEl.className = `solvecha-toast ${kind || "info"}`;
     toastEl.hidden = false;
     clearTimeout(toastEl._t);
-    if (kind === "busy") return; // stay visible for the whole solve
+    if (kind === "busy") return;
     toastEl._t = setTimeout(() => {
       toastEl.hidden = true;
     }, kind === "error" ? 12000 : 5000);
   }
-
-  // ---- wiring -------------------------------------------------------------
 
   let scanPending = false;
   function scheduleScan() {
@@ -313,7 +435,7 @@
     setTimeout(() => {
       scanPending = false;
       scan();
-    }, 100); // Faster: was 250ms, now 100ms for quicker challenge detection
+    }, 100);
   }
 
   new MutationObserver(scheduleScan).observe(document.documentElement, {
@@ -321,13 +443,12 @@
     subtree: true,
   });
 
-  // Re-solve hook: if a token we injected gets consumed while a new challenge
-  // is open, let scan() re-arm that widget (cheap 2s poll, no quota risk).
   setInterval(() => {
     if (!config.enabled) return;
-    if (!challengePresent() || tokenPresent()) return;
-    scan();
-  }, 2000); // Faster: was 4000ms, now 2000ms for quicker re-solve
+    const hNeed = challengePresent() && !hcaptchaTokenPresent();
+    const tNeed = turnstileWidgetPresent() && !turnstileTokenPresent();
+    if (hNeed || tNeed) scan();
+  }, 2000);
 
   scan();
 })();

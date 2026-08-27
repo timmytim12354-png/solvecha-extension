@@ -18,6 +18,115 @@ const inFlight = new Map(); // `${sitekey}|${host}` -> Promise<solve result>
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+const liveLogs = {
+  entries: [],
+  done: true,
+  failed: false,
+  label: "",
+  startedAt: 0,
+  tabId: null,
+  trace: null,
+};
+let logPollTimer = null;
+
+function newTraceId() {
+  const raw = (globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`).replace(/-/g, "");
+  return `sc_${raw.slice(0, 20)}`;
+}
+
+function getLiveLogs() {
+  return {
+    entries: liveLogs.entries,
+    done: liveLogs.done,
+    failed: liveLogs.failed,
+    label: liveLogs.label,
+    startedAt: liveLogs.startedAt,
+  };
+}
+
+function broadcastLogs() {
+  const payload = {
+    type: "SOLVE_LOG",
+    entries: liveLogs.entries,
+    done: liveLogs.done,
+    failed: liveLogs.failed,
+    label: liveLogs.label,
+  };
+  if (liveLogs.tabId != null) {
+    chrome.tabs.sendMessage(liveLogs.tabId, payload).catch(() => {});
+  }
+}
+
+function addLog(level, kind, msg) {
+  liveLogs.entries.push({ ts: Date.now(), level, kind, msg });
+  if (liveLogs.entries.length > 250) liveLogs.entries.splice(0, liveLogs.entries.length - 250);
+  broadcastLogs();
+}
+
+function mergeRemote(events) {
+  const seen = new Set(liveLogs.entries.map((e) => `${e.ts}|${e.msg}`));
+  let added = 0;
+  for (const e of events || []) {
+    const msg = String(e.msg || "");
+    const ts = Number(e.ts) || Date.now();
+    const key = `${ts}|${msg}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    liveLogs.entries.push({
+      ts,
+      level: e.level || "info",
+      kind: e.kind || "log",
+      msg,
+    });
+    added += 1;
+  }
+  if (added) {
+    liveLogs.entries.sort((a, b) => a.ts - b.ts);
+    broadcastLogs();
+  }
+}
+
+function stopLogPoll() {
+  if (logPollTimer) {
+    clearInterval(logPollTimer);
+    logPollTimer = null;
+  }
+}
+
+function startLogSession(tabId, captchaType, trace) {
+  stopLogPoll();
+  liveLogs.entries = [];
+  liveLogs.done = false;
+  liveLogs.failed = false;
+  liveLogs.label = captchaType === "turnstile" ? "Solving Turnstile" : "Solving hCaptcha";
+  liveLogs.startedAt = Date.now();
+  liveLogs.tabId = tabId ?? null;
+  liveLogs.trace = trace;
+  if (tabId != null) {
+    chrome.tabs.sendMessage(tabId, { type: "SOLVE_PANEL_OPEN", label: liveLogs.label }).catch(() => {});
+  }
+}
+
+async function pollTraceOnce(config, trace) {
+  const base = config.apiBase || DEFAULT_API_BASE;
+  try {
+    const res = await fetch(`${base}/api/v1/trace?id=${encodeURIComponent(trace)}`, {
+      headers: { authorization: `Bearer ${config.apiKey}` },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (Array.isArray(data.events)) mergeRemote(data.events);
+    if (data.done && liveLogs.done) stopLogPoll();
+  } catch {
+    /* keep local logs */
+  }
+}
+
+function startLogPoll(config, trace) {
+  stopLogPoll();
+  setTimeout(() => pollTraceOnce(config, trace), 250);
+  logPollTimer = setInterval(() => pollTraceOnce(config, trace), 450);
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   handleMessage(msg, sender)
     .then((result) =>
@@ -36,7 +145,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 async function handleMessage(msg, sender) {
   switch (msg?.type) {
     case "SOLVE":
-      return solve(msg);
+      return solve(msg, sender);
+    case "GET_LOGS":
+      return getLiveLogs();
     case "VALIDATE_KEY":
       return validateKey(msg.key);
     case "GET_STATUS":
@@ -78,7 +189,7 @@ async function handleMessage(msg, sender) {
 
 // ---- solving ---------------------------------------------------------------
 
-async function solve(msg) {
+async function solve(msg, sender) {
   const config = await getConfig();
   if (!config.enabled) {
     return { ok: false, code: "disabled", message: "Auto-solve is turned off." };
@@ -107,9 +218,14 @@ async function solve(msg) {
     /* keep fallback */
   }
   const cacheKey = `${captchaType}|${sitekey}|${host}`;
+  const tabId = sender?.tab?.id ?? null;
 
   const cached = tokenCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
+    startLogSession(tabId, captchaType, null);
+    addLog("ok", "done", "Using a cached token");
+    liveLogs.done = true;
+    broadcastLogs();
     return { ok: true, token: cached.token, fromCache: true };
   }
 
@@ -119,11 +235,27 @@ async function solve(msg) {
     return inFlight.get(cacheKey);
   }
 
-  const pending = performSolve(config, sitekey, pageurl, captchaType).then((res) => {
+  const trace = newTraceId();
+  startLogSession(tabId, captchaType, trace);
+  addLog("info", "detect", `Detected ${captchaType} (${sitekey.slice(0, 10)}…)`);
+  addLog("info", "queue", "Sending solve to Solvecha…");
+  startLogPoll(config, trace);
+
+  const pending = performSolve(config, sitekey, pageurl, captchaType, 1, trace).then((res) => {
     if (res.ok && res.token) {
       const ttl = captchaType === "turnstile" ? TURNSTILE_TTL_MS : HCAPTCHA_TTL_MS;
       tokenCache.set(cacheKey, { token: res.token, expiresAt: Date.now() + ttl });
+      addLog("ok", "done", "Token received — injecting into the page");
+      liveLogs.failed = false;
+    } else {
+      addLog("error", "error", res.message || "Solve failed");
+      liveLogs.failed = true;
     }
+    liveLogs.done = true;
+    pollTraceOnce(config, trace).finally(() => {
+      stopLogPoll();
+      broadcastLogs();
+    });
     return res;
   });
   inFlight.set(cacheKey, pending);
@@ -134,7 +266,7 @@ async function solve(msg) {
   }
 }
 
-async function performSolve(config, sitekey, pageurl, captchaType, attempt = 1) {
+async function performSolve(config, sitekey, pageurl, captchaType, attempt = 1, trace = null) {
   const base = config.apiBase || DEFAULT_API_BASE;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SOLVE_TIMEOUT_MS);
@@ -145,7 +277,7 @@ async function performSolve(config, sitekey, pageurl, captchaType, attempt = 1) 
         "content-type": "application/json",
         authorization: `Bearer ${config.apiKey}`,
       },
-      body: JSON.stringify({ sitekey, pageurl, type: captchaType }),
+      body: JSON.stringify({ sitekey, pageurl, type: captchaType, ...(trace ? { trace } : {}) }),
       signal: controller.signal,
     });
     const data = await res.json().catch(() => ({}));
@@ -178,8 +310,9 @@ async function performSolve(config, sitekey, pageurl, captchaType, attempt = 1) 
     const maxAttempts = busy ? 4 : 2;
     if (retryable.has(code) && attempt < maxAttempts) {
       const wait = busy ? (Number(data.retryAfter) || 8) * 1000 : code === "solve_timeout" ? 4000 : 800;
+      addLog("warn", "queue", `Solver busy — retry ${attempt + 1} in ${Math.round(wait / 1000)}s`);
       await sleep(wait);
-      return performSolve(config, sitekey, pageurl, captchaType, attempt + 1);
+      return performSolve(config, sitekey, pageurl, captchaType, attempt + 1, trace);
     }
 
     await setStatus({ error: { code, message }, lastErrorAt: Date.now() });
@@ -188,7 +321,7 @@ async function performSolve(config, sitekey, pageurl, captchaType, attempt = 1) 
     if (err?.name === "AbortError") {
       if (attempt < 3) {
         await sleep(5000);
-        return performSolve(config, sitekey, pageurl, captchaType, attempt + 1);
+        return performSolve(config, sitekey, pageurl, captchaType, attempt + 1, trace);
       }
       const message = `The solve is taking longer than ${Math.round(
         SOLVE_TIMEOUT_MS / 1000,
@@ -198,7 +331,7 @@ async function performSolve(config, sitekey, pageurl, captchaType, attempt = 1) 
     }
     if (attempt < 3) {
       await sleep(1500 * attempt);
-      return performSolve(config, sitekey, pageurl, captchaType, attempt + 1);
+      return performSolve(config, sitekey, pageurl, captchaType, attempt + 1, trace);
     }
     const message = "Couldn't reach solvecha.net. Check your connection.";
     await setStatus({ error: { code: "network", message }, lastErrorAt: Date.now() });

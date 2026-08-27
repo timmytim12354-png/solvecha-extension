@@ -219,6 +219,11 @@
     state.set(key, s);
 
     const label = captchaType === "turnstile" ? "Turnstile" : "hCaptcha";
+    try {
+      globalThis.__solvechaPanel?.open(`Solving ${label}`);
+    } catch {
+      /* panel script not injected in this frame */
+    }
     toast(`Solving ${label}…`, "busy");
     const solveStartedAt = Date.now();
     const elapsedTimer = setInterval(() => {
@@ -402,6 +407,11 @@
 
   let toastEl = null;
   function toast(message, kind) {
+    try {
+      if (window.top === window && globalThis.__solvechaPanel) return;
+    } catch {
+      /* keep toast in nested frames */
+    }
     if (!toastEl) {
       const style = document.createElement("style");
       style.textContent =
